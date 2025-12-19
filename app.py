@@ -1,6 +1,10 @@
 import os
+import json
+import logging
 import requests
 from flask import Flask, request, jsonify
+
+logging.basicConfig(level=logging.INFO)
 
 app = Flask(__name__)
 
@@ -8,101 +12,87 @@ app = Flask(__name__)
 # CONFIG
 # ===============================
 
-ROBLOX_API_KEY = os.environ.get("ROBLOX_API_KEY")
-UNIVERSE_ID = 3064619271
-DATASTORE_NAME = "TransferStore"
+API_KEY = os.getenv("ROBLOX_API_KEY")  # REQUIRED
+NEW_UNIVERSE = 3064619271
+NEW_DATASTORE = "TransferStore"
 
-if not ROBLOX_API_KEY:
-    raise RuntimeError("ROBLOX_API_KEY is not set")
-
-ROBLOX_DATASTORE_URL = (
-    f"https://apis.roblox.com/datastores/v1/universes/"
-    f"{UNIVERSE_ID}/standard-datastores/datastore/entries/entry"
-)
-
-HEADERS = {
-    "x-api-key": ROBLOX_API_KEY,
-    "Content-Type": "application/json",
-}
-
-print("[BOOT] Flask app started")
-print(f"[BOOT] Universe ID: {UNIVERSE_ID}")
-print(f"[BOOT] Datastore: {DATASTORE_NAME}")
+if not API_KEY:
+    raise RuntimeError("ROBLOX_API_KEY not set")
 
 # ===============================
-# HEALTH CHECK
+# Roblox Datastore Write
+# ===============================
+
+def write_to_datastore(entry_key, data):
+    url = (
+        f"https://apis.roblox.com/datastores/v1/universes/"
+        f"{NEW_UNIVERSE}/standard-datastores/datastore/entries/entry"
+    )
+
+    headers = {
+        "x-api-key": API_KEY,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    params = {
+        "datastoreName": NEW_DATASTORE,
+        "scope": "global",
+        "entryKey": entry_key,
+    }
+
+    response = requests.post(
+        url,
+        headers=headers,
+        params=params,
+        data=json.dumps(data),
+        timeout=10,
+    )
+
+    response.raise_for_status()
+
+# ===============================
+# Health Check
 # ===============================
 
 @app.route("/", methods=["GET"])
 def health():
-    print("[HEALTH] Health check hit")
     return "OK", 200
 
 # ===============================
-# WRITE TO DATASTORE
+# RECEIVE DATA FROM OLD GAME
 # ===============================
 
 @app.route("/upload", methods=["POST"])
 def upload():
-    print("\n[UPLOAD] Incoming request")
+    try:
+        payload = request.get_json(force=True)
 
-    payload = request.get_json(silent=True)
+        entry_key = payload.get("entryKey")
+        data = payload.get("data")
 
-    if not payload:
-        print("[UPLOAD][ERROR] Invalid or missing JSON body")
-        return jsonify({"error": "Invalid JSON"}), 400
+        if not entry_key or data is None:
+            return jsonify({
+                "success": False,
+                "error": "entryKey and data are required"
+            }), 400
 
-    print(f"[UPLOAD] Payload received: {payload}")
+        write_to_datastore(entry_key, data)
 
-    entry_key = payload.get("entryKey")
-    data = payload.get("data")
-
-    if not entry_key or data is None:
-        print("[UPLOAD][ERROR] Missing entryKey or data")
-        print(f"[UPLOAD] entryKey: {entry_key}")
-        print(f"[UPLOAD] data: {data}")
         return jsonify({
-            "error": "entryKey and data are required"
-        }), 400
+            "success": True,
+            "writtenKey": entry_key
+        }), 200
 
-    print(f"[UPLOAD] entryKey = {entry_key}")
-    print(f"[UPLOAD] data size = {len(str(data))} bytes (approx)")
-
-    params = {
-        "datastoreName": DATASTORE_NAME,
-        "scope": "global",
-        "entryKey": entry_key,
-        # add this if you want overwrite behavior
-        # "exclusiveCreate": "false",
-    }
-
-    print("[ROBLOX] Sending PUT request to Datastore API")
-    print(f"[ROBLOX] URL: {ROBLOX_DATASTORE_URL}")
-    print(f"[ROBLOX] Params: {params}")
-
-    response = requests.put(
-        ROBLOX_DATASTORE_URL,
-        headers=HEADERS,
-        params=params,
-        json=data,
-        timeout=15,
-    )
-
-    print("[ROBLOX] Response received")
-    print(f"[ROBLOX] Status code: {response.status_code}")
-    print(f"[ROBLOX] Response body: {response.text}")
-
-    if not response.ok:
-        print("[ROBLOX][ERROR] Datastore write rejected")
+    except requests.HTTPError as e:
         return jsonify({
-            "error": "Roblox API rejected the write",
-            "status": response.status_code,
-            "details": response.text,
+            "success": False,
+            "error": "Roblox API error",
+            "details": str(e)
         }), 502
 
-    print("[UPLOAD][SUCCESS] Datastore write succeeded")
-
-    return jsonify({
-        "success": True,
-        "writtenKey": entry_key
-    }), 200
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
