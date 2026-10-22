@@ -6,6 +6,7 @@ import time
 import logging
 import requests
 from flask import Flask, request, jsonify
+from werkzeug.exceptions import RequestEntityTooLarge
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("transfer")
@@ -17,19 +18,23 @@ app = Flask(__name__)
 # ===============================
 
 API_KEY = os.getenv("ROBLOX_API_KEY")  # REQUIRED
-# Shared secret the old game sends in the X-Transfer-Secret header.
-# While this is unset uploads are accepted without it, so the game can be updated first.
 UPLOAD_SECRET = os.getenv("TRANSFER_UPLOAD_SECRET")
+PREVIOUS_UPLOAD_SECRET = os.getenv("TRANSFER_UPLOAD_SECRET_PREVIOUS")
 NEW_UNIVERSE = 3064619271
 NEW_DATASTORE = "TransferStore"
 ENTRY_KEY_PATTERN = re.compile(r"^Player_[1-9][0-9]{0,19}$")
 MAX_ENTRY_BYTES = 3_500_000  # datastore entries are capped at 4MB
+app.config["MAX_CONTENT_LENGTH"] = 4_194_304
 
 if not API_KEY:
     raise RuntimeError("ROBLOX_API_KEY not set")
 
 if not UPLOAD_SECRET:
-    log.warning("TRANSFER_UPLOAD_SECRET not set, /upload is open to anyone")
+    raise RuntimeError("TRANSFER_UPLOAD_SECRET not set")
+
+UPLOAD_SECRETS = [UPLOAD_SECRET.encode()]
+if PREVIOUS_UPLOAD_SECRET:
+    UPLOAD_SECRETS.append(PREVIOUS_UPLOAD_SECRET.encode())
 
 # ===============================
 # Roblox Datastore Write
@@ -83,14 +88,13 @@ def health():
 @app.route("/upload", methods=["POST"])
 def upload():
     try:
-        if UPLOAD_SECRET:
-            provided = request.headers.get("X-Transfer-Secret", "")
-            if not hmac.compare_digest(provided.encode(), UPLOAD_SECRET.encode()):
-                log.warning("rejected upload with a bad secret from %s", request.remote_addr)
-                return jsonify({
-                    "success": False,
-                    "error": "unauthorized"
-                }), 401
+        provided = request.headers.get("X-Transfer-Secret", "").encode()
+        if not any(hmac.compare_digest(provided, secret) for secret in UPLOAD_SECRETS):
+            log.warning("rejected upload with a bad secret from %s", request.remote_addr)
+            return jsonify({
+                "success": False,
+                "error": "unauthorized"
+            }), 401
 
         payload = request.get_json(force=True, silent=True)
         if not isinstance(payload, dict):
@@ -102,7 +106,7 @@ def upload():
         entry_key = payload.get("entryKey")
         data = payload.get("data")
 
-        if not isinstance(entry_key, str) or not ENTRY_KEY_PATTERN.match(entry_key):
+        if not isinstance(entry_key, str) or not ENTRY_KEY_PATTERN.fullmatch(entry_key):
             return jsonify({
                 "success": False,
                 "error": "entryKey must look like Player_<UserId>"
@@ -129,19 +133,24 @@ def upload():
             "writtenKey": entry_key
         }), 200
 
-    except requests.HTTPError as e:
+    except RequestEntityTooLarge:
+        return jsonify({
+            "success": False,
+            "error": "request body too large"
+        }), 413
+
+    except requests.RequestException as e:
         log.error("roblox api error for upload: %s", e)
         return jsonify({
             "success": False,
-            "error": "Roblox API error",
-            "details": str(e)
+            "error": "Roblox API error"
         }), 502
 
-    except Exception as e:
+    except Exception:
         log.exception("upload failed")
         return jsonify({
             "success": False,
-            "error": str(e)
+            "error": "upload failed"
         }), 500
 
 
