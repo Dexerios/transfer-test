@@ -1,0 +1,28 @@
+name: Transfer security tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  transfer-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - run: docker build --pull -t transfer-tests .
+      - run: docker run --rm --entrypoint python -v "$PWD/tests:/app/tests:ro" transfer-tests -m unittest discover -s tests -v
+      - name: Check production Gunicorn startup and authentication
+        run: |
+          docker run -d --name transfer-smoke -p 127.0.0.1:8080:8080 -e ROBLOX_API_KEY=test-api-key -e TRANSFER_UPLOAD_SECRET=test-secret transfer-tests
+          curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:8080/
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST http://127.0.0.1:8080/upload)" = 401
+      - if: always()
+        run: |
+          docker logs transfer-smoke
+          docker rm -f transfer-smoke
